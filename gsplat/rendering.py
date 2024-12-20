@@ -367,7 +367,7 @@ def rasterization(
                 pass
     else:
         # Colors are SH coefficients, with shape [N, K, 3] or [C, N, K, 3]
-        camtoworlds = torch.inverse(viewmats)  # [C, 4, 4]
+        camtoworlds = torch.linalg.inv_ex(viewmats).inverse  # [C, 4, 4]
         if packed:
             dirs = means[gaussian_ids, :] - camtoworlds[camera_ids, :3, 3]  # [nnz, 3]
             masks = radii > 0  # [nnz]
