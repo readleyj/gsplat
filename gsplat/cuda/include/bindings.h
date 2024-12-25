@@ -98,12 +98,12 @@ std::tuple<
     torch::Tensor,
     torch::Tensor>
 fully_fused_projection_fwd_tensor(
-    const torch::Tensor &means,                // [N, 3]
-    const at::optional<torch::Tensor> &covars, // [N, 6] optional
-    const at::optional<torch::Tensor> &quats,  // [N, 4] optional
-    const at::optional<torch::Tensor> &scales, // [N, 3] optional
-    const torch::Tensor &viewmats,             // [C, 4, 4]
-    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const torch::Tensor &means,                // [B, N, 3]
+    const at::optional<torch::Tensor> &covars, // [B, N, 6] optional
+    const at::optional<torch::Tensor> &quats,  // [B, N, 4] optional
+    const at::optional<torch::Tensor> &scales, // [B, N, 3] optional
+    const torch::Tensor &viewmats,             // [B, C, 4, 4]
+    const torch::Tensor &Ks,                   // [B, C, 3, 3]
     const uint32_t image_width,
     const uint32_t image_height,
     const float eps2d,
@@ -145,9 +145,9 @@ fully_fused_projection_bwd_tensor(
 );
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> isect_tiles_tensor(
-    const torch::Tensor &means2d,                    // [C, N, 2] or [nnz, 2]
-    const torch::Tensor &radii,                      // [C, N] or [nnz]
-    const torch::Tensor &depths,                     // [C, N] or [nnz]
+    const torch::Tensor &means2d,                    // [B, C, N, 2] or [nnz, 2]
+    const torch::Tensor &radii,                      // [B, C, N] or [nnz]
+    const torch::Tensor &depths,                     // [B, C, N] or [nnz]
     const at::optional<torch::Tensor> &camera_ids,   // [nnz]
     const at::optional<torch::Tensor> &gaussian_ids, // [nnz]
     const uint32_t C,
@@ -260,12 +260,12 @@ std::tuple<
     torch::Tensor,
     torch::Tensor>
 fully_fused_projection_packed_fwd_tensor(
-    const torch::Tensor &means,                // [N, 3]
-    const at::optional<torch::Tensor> &covars, // [N, 6]
-    const at::optional<torch::Tensor> &quats,  // [N, 3]
-    const at::optional<torch::Tensor> &scales, // [N, 3]
-    const torch::Tensor &viewmats,             // [C, 4, 4]
-    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const torch::Tensor &means,                // [B, N, 3]
+    const at::optional<torch::Tensor> &covars, // [B, N, 6]
+    const at::optional<torch::Tensor> &quats,  // [B, N, 3]
+    const at::optional<torch::Tensor> &scales, // [B, N, 3]
+    const torch::Tensor &viewmats,             // [B, C, 4, 4]
+    const torch::Tensor &Ks,                   // [B, C, 3, 3]
     const uint32_t image_width,
     const uint32_t image_height,
     const float eps2d,
@@ -284,17 +284,18 @@ std::tuple<
     torch::Tensor>
 fully_fused_projection_packed_bwd_tensor(
     // fwd inputs
-    const torch::Tensor &means,                // [N, 3]
-    const at::optional<torch::Tensor> &covars, // [N, 6]
-    const at::optional<torch::Tensor> &quats,  // [N, 4]
-    const at::optional<torch::Tensor> &scales, // [N, 3]
-    const torch::Tensor &viewmats,             // [C, 4, 4]
-    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const torch::Tensor &means,                // [B, N, 3]
+    const at::optional<torch::Tensor> &covars, // [B, N, 6]
+    const at::optional<torch::Tensor> &quats,  // [B, N, 4]
+    const at::optional<torch::Tensor> &scales, // [B, N, 3]
+    const torch::Tensor &viewmats,             // [B, C, 4, 4]
+    const torch::Tensor &Ks,                   // [B, C, 3, 3]
     const uint32_t image_width,
     const uint32_t image_height,
     const float eps2d,
     const CameraModelType camera_model,
     // fwd outputs
+    const torch::Tensor &batch_ids,                   // [nnz]
     const torch::Tensor &camera_ids,                  // [nnz]
     const torch::Tensor &gaussian_ids,                // [nnz]
     const torch::Tensor &conics,                      // [nnz, 3]
@@ -487,19 +488,6 @@ fully_fused_projection_packed_bwd_2dgs_tensor(
     const bool viewmats_requires_grad,
     const bool sparse_grad
 );
-
-void selective_adam_update(
-    torch::Tensor &param,
-    torch::Tensor &param_grad,
-    torch::Tensor &exp_avg,
-    torch::Tensor &exp_avg_sq,
-    torch::Tensor &tiles_touched,
-    const float lr,
-    const float b1,
-    const float b2,
-    const float eps,
-    const uint32_t N,
-    const uint32_t M);
 
 } // namespace gsplat
 

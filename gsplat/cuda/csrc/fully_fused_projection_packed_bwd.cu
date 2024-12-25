@@ -23,20 +23,22 @@ namespace cg = cooperative_groups;
 template <typename T>
 __global__ void fully_fused_projection_packed_bwd_kernel(
     // fwd inputs
+    const uint32_t B,
     const uint32_t C,
     const uint32_t N,
     const uint32_t nnz,
-    const T *__restrict__ means,    // [N, 3]
-    const T *__restrict__ covars,   // [N, 6] Optional
-    const T *__restrict__ quats,    // [N, 4] Optional
-    const T *__restrict__ scales,   // [N, 3] Optional
-    const T *__restrict__ viewmats, // [C, 4, 4]
-    const T *__restrict__ Ks,       // [C, 3, 3]
+    const T *__restrict__ means,    // [B, N, 3]
+    const T *__restrict__ covars,   // [B, N, 6] Optional
+    const T *__restrict__ quats,    // [B, N, 4] Optional
+    const T *__restrict__ scales,   // [B, N, 3] Optional
+    const T *__restrict__ viewmats, // [B, C, 4, 4]
+    const T *__restrict__ Ks,       // [B, C, 3, 3]
     const int32_t image_width,
     const int32_t image_height,
     const T eps2d,
     const CameraModelType camera_model,
     // fwd outputs
+    const int64_t *__restrict__ batch_ids,    // [nnz]
     const int64_t *__restrict__ camera_ids,   // [nnz]
     const int64_t *__restrict__ gaussian_ids, // [nnz]
     const T *__restrict__ conics,             // [nnz, 3]
@@ -48,24 +50,26 @@ __global__ void fully_fused_projection_packed_bwd_kernel(
     const T *__restrict__ v_compensations, // [nnz] optional
     const bool sparse_grad, // whether the outputs are in COO format [nnz, ...]
     // grad inputs
-    T *__restrict__ v_means,   // [N, 3] or [nnz, 3]
-    T *__restrict__ v_covars,  // [N, 6] or [nnz, 6] Optional
-    T *__restrict__ v_quats,   // [N, 4] or [nnz, 4] Optional
-    T *__restrict__ v_scales,  // [N, 3] or [nnz, 3] Optional
-    T *__restrict__ v_viewmats // [C, 4, 4] Optional
+    T *__restrict__ v_means,   // [B, N, 3] or [nnz, 3]
+    T *__restrict__ v_covars,  // [B, N, 6] or [nnz, 6] Optional
+    T *__restrict__ v_quats,   // [B, N, 4] or [nnz, 4] Optional
+    T *__restrict__ v_scales,  // [B, N, 3] or [nnz, 3] Optional
+    T *__restrict__ v_viewmats // [B, C, 4, 4] Optional
 ) {
     // parallelize over nnz.
     uint32_t idx = cg::this_grid().thread_rank();
     if (idx >= nnz) {
         return;
     }
+
+    const int64_t bid = batch_ids[idx];    // batch id
     const int64_t cid = camera_ids[idx];   // camera id
     const int64_t gid = gaussian_ids[idx]; // gaussian id
 
     // shift pointers to the current camera and gaussian
-    means += gid * 3;
-    viewmats += cid * 16;
-    Ks += cid * 9;
+    means += gid * 3 + bid * N * 3;
+    viewmats += cid * 16 + bid * C * 16;
+    Ks += cid * 9 + bid * C * 9;
 
     conics += idx * 3;
 
@@ -107,7 +111,7 @@ __global__ void fully_fused_projection_packed_bwd_kernel(
     vec3<T> scale;
     if (covars != nullptr) {
         // if a precomputed covariance is provided
-        covars += gid * 6;
+        covars += gid * 6 + bid * N * 6;
         covar = mat3<T>(
             covars[0],
             covars[1],
@@ -240,7 +244,7 @@ __global__ void fully_fused_projection_packed_bwd_kernel(
         if (v_means != nullptr) {
             warpSum(v_mean, warp_group_g);
             if (warp_group_g.thread_rank() == 0) {
-                v_means += gid * 3;
+                v_means += gid * 3 + bid * N * 3;
                 GSPLAT_PRAGMA_UNROLL
                 for (uint32_t i = 0; i < 3; i++) {
                     gpuAtomicAdd(v_means + i, v_mean[i]);
@@ -251,7 +255,7 @@ __global__ void fully_fused_projection_packed_bwd_kernel(
             // Directly output gradients w.r.t. the covariance
             warpSum(v_covar, warp_group_g);
             if (warp_group_g.thread_rank() == 0) {
-                v_covars += gid * 6;
+                v_covars += gid * 6 + bid * N * 6;
                 gpuAtomicAdd(v_covars, v_covar[0][0]);
                 gpuAtomicAdd(v_covars + 1, v_covar[0][1] + v_covar[1][0]);
                 gpuAtomicAdd(v_covars + 2, v_covar[0][2] + v_covar[2][0]);
@@ -270,8 +274,8 @@ __global__ void fully_fused_projection_packed_bwd_kernel(
             warpSum(v_quat, warp_group_g);
             warpSum(v_scale, warp_group_g);
             if (warp_group_g.thread_rank() == 0) {
-                v_quats += gid * 4;
-                v_scales += gid * 3;
+                v_quats += gid * 4 + bid * N * 4;
+                v_scales += gid * 3 + bid * N * 3;
                 gpuAtomicAdd(v_quats, v_quat[0]);
                 gpuAtomicAdd(v_quats + 1, v_quat[1]);
                 gpuAtomicAdd(v_quats + 2, v_quat[2]);
@@ -288,7 +292,7 @@ __global__ void fully_fused_projection_packed_bwd_kernel(
         warpSum(v_R, warp_group_c);
         warpSum(v_t, warp_group_c);
         if (warp_group_c.thread_rank() == 0) {
-            v_viewmats += cid * 16;
+            v_viewmats += cid * 16 + bid * C * 16;
             GSPLAT_PRAGMA_UNROLL
             for (uint32_t i = 0; i < 3; i++) { // rows
                 GSPLAT_PRAGMA_UNROLL
@@ -309,17 +313,18 @@ std::tuple<
     torch::Tensor>
 fully_fused_projection_packed_bwd_tensor(
     // fwd inputs
-    const torch::Tensor &means,                // [N, 3]
-    const at::optional<torch::Tensor> &covars, // [N, 6]
-    const at::optional<torch::Tensor> &quats,  // [N, 4]
-    const at::optional<torch::Tensor> &scales, // [N, 3]
-    const torch::Tensor &viewmats,             // [C, 4, 4]
-    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const torch::Tensor &means,                // [B, N, 3]
+    const at::optional<torch::Tensor> &covars, // [B, N, 6]
+    const at::optional<torch::Tensor> &quats,  // [B, N, 4]
+    const at::optional<torch::Tensor> &scales, // [B, N, 3]
+    const torch::Tensor &viewmats,             // [B, C, 4, 4]
+    const torch::Tensor &Ks,                   // [B, C, 3, 3]
     const uint32_t image_width,
     const uint32_t image_height,
     const float eps2d,
     const CameraModelType camera_model,
     // fwd outputs
+    const torch::Tensor &batch_ids,                   // [nnz]
     const torch::Tensor &camera_ids,                  // [nnz]
     const torch::Tensor &gaussian_ids,                // [nnz]
     const torch::Tensor &conics,                      // [nnz, 3]
@@ -343,6 +348,7 @@ fully_fused_projection_packed_bwd_tensor(
     }
     GSPLAT_CHECK_INPUT(viewmats);
     GSPLAT_CHECK_INPUT(Ks);
+    GSPLAT_CHECK_INPUT(batch_ids);
     GSPLAT_CHECK_INPUT(camera_ids);
     GSPLAT_CHECK_INPUT(gaussian_ids);
     GSPLAT_CHECK_INPUT(conics);
@@ -357,8 +363,9 @@ fully_fused_projection_packed_bwd_tensor(
         assert(compensations.has_value());
     }
 
-    uint32_t N = means.size(0);    // number of gaussians
-    uint32_t C = viewmats.size(0); // number of cameras
+    uint32_t B = means.size(0);    // batch size
+    uint32_t N = means.size(1);    // number of gaussians
+    uint32_t C = viewmats.size(1); // number of cameras
     uint32_t nnz = camera_ids.size(0);
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
@@ -372,7 +379,7 @@ fully_fused_projection_packed_bwd_tensor(
             v_scales = torch::zeros({nnz, 3}, scales.value().options());
         }
         if (viewmats_requires_grad) {
-            v_viewmats = torch::zeros({C, 4, 4}, viewmats.options());
+            v_viewmats = torch::zeros_like(viewmats);
         }
     } else {
         v_means = torch::zeros_like(means);
@@ -392,6 +399,7 @@ fully_fused_projection_packed_bwd_tensor(
                GSPLAT_N_THREADS,
                0,
                stream>>>(
+                B,
                 C,
                 N,
                 nnz,
@@ -405,6 +413,7 @@ fully_fused_projection_packed_bwd_tensor(
                 image_height,
                 eps2d,
                 camera_model,
+                batch_ids.data_ptr<int64_t>(),
                 camera_ids.data_ptr<int64_t>(),
                 gaussian_ids.data_ptr<int64_t>(),
                 conics.data_ptr<float>(),

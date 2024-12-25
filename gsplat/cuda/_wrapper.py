@@ -74,8 +74,8 @@ def spherical_harmonics(
 
 
 def quat_scale_to_covar_preci(
-    quats: Tensor,  # [N, 4],
-    scales: Tensor,  # [N, 3],
+    quats: Tensor,  # [..., 4],
+    scales: Tensor,  # [..., 3],
     compute_covar: bool = True,
     compute_preci: bool = True,
     triu: bool = False,
@@ -83,8 +83,8 @@ def quat_scale_to_covar_preci(
     """Converts quaternions and scales to covariance and precision matrices.
 
     Args:
-        quats: Quaternions (No need to be normalized). [N, 4]
-        scales: Scales. [N, 3]
+        quats: Quaternions (No need to be normalized). [..., 4]
+        scales: Scales. [..., 3]
         compute_covar: Whether to compute covariance matrices. Default: True. If False,
             the returned covariance matrices will be None.
         compute_preci: Whether to compute precision matrices. Default: True. If False,
@@ -94,11 +94,12 @@ def quat_scale_to_covar_preci(
     Returns:
         A tuple:
 
-        - **Covariance matrices**. If `triu` is True the returned shape is [N, 6], otherwise [N, 3, 3].
-        - **Precision matrices**. If `triu` is True the returned shape is [N, 6], otherwise [N, 3, 3].
+        - **Covariance matrices**. If `triu` is True the returned shape is [..., 6], otherwise [..., 3, 3].
+        - **Precision matrices**. If `triu` is True the returned shape is [..., 6], otherwise [..., 3, 3].
     """
-    assert quats.dim() == 2 and quats.size(1) == 4, quats.size()
-    assert scales.dim() == 2 and scales.size(1) == 3, scales.size()
+    assert quats.shape[:-1] == scales.shape[:-1], (quats.shape, scales.shape)
+    assert quats.shape[-1] == 4, quats.shape
+    assert scales.shape[-1] == 3, scales.shape
     quats = quats.contiguous()
     scales = scales.contiguous()
     covars, precis = _QuatScaleToCovarPreci.apply(
@@ -172,28 +173,29 @@ def proj(
 
 
 def world_to_cam(
-    means: Tensor,  # [N, 3]
-    covars: Tensor,  # [N, 3, 3]
-    viewmats: Tensor,  # [C, 4, 4]
+    means: Tensor,  # [B, N, 3]
+    covars: Tensor,  # [B, N, 3, 3]
+    viewmats: Tensor,  # [B, C, 4, 4]
 ) -> Tuple[Tensor, Tensor]:
     """Transforms Gaussians from world to camera coordinate system.
 
     Args:
-        means: Gaussian means. [N, 3]
-        covars: Gaussian covariances. [N, 3, 3]
-        viewmats: World-to-camera transformation matrices. [C, 4, 4]
+        means: Gaussian means. [B, N, 3]
+        covars: Gaussian covariances. [B, N, 3, 3]
+        viewmats: World-to-camera transformation matrices. [B, C, 4, 4]
 
     Returns:
         A tuple:
 
-        - **Gaussian means in camera coordinate system**. [C, N, 3]
-        - **Gaussian covariances in camera coordinate system**. [C, N, 3, 3]
+        - **Gaussian means in camera coordinate system**. [B, C, N, 3]
+        - **Gaussian covariances in camera coordinate system**. [B, C, N, 3, 3]
     """
-    C = viewmats.size(0)
-    N = means.size(0)
-    assert means.size() == (N, 3), means.size()
-    assert covars.size() == (N, 3, 3), covars.size()
-    assert viewmats.size() == (C, 4, 4), viewmats.size()
+    B = means.size(0)
+    C = viewmats.size(1)
+    N = means.size(1)
+    assert means.size() == (B, N, 3), means.size()
+    assert covars.size() == (B, N, 3, 3), covars.size()
+    assert viewmats.size() == (B, C, 4, 4), viewmats.size()
     means = means.contiguous()
     covars = covars.contiguous()
     viewmats = viewmats.contiguous()
@@ -201,12 +203,12 @@ def world_to_cam(
 
 
 def fully_fused_projection(
-    means: Tensor,  # [N, 3]
-    covars: Optional[Tensor],  # [N, 6] or None
-    quats: Optional[Tensor],  # [N, 4] or None
-    scales: Optional[Tensor],  # [N, 3] or None
-    viewmats: Tensor,  # [C, 4, 4]
-    Ks: Tensor,  # [C, 3, 3]
+    means: Tensor,  # [B, N, 3]
+    covars: Optional[Tensor],  # [B, N, 6] or None
+    quats: Optional[Tensor],  # [B, N, 4] or None
+    scales: Optional[Tensor],  # [B, N, 3] or None
+    viewmats: Tensor,  # [B, C, 4, 4]
+    Ks: Tensor,  # [B, C, 3, 3]
     width: int,
     height: int,
     eps2d: float = 0.3,
@@ -242,12 +244,12 @@ def fully_fused_projection(
         {`quats`, `scales`} should be provided.
 
     Args:
-        means: Gaussian means. [N, 3]
-        covars: Gaussian covariances (flattened upper triangle). [N, 6] Optional.
-        quats: Quaternions (No need to be normalized). [N, 4] Optional.
-        scales: Scales. [N, 3] Optional.
-        viewmats: Camera-to-world matrices. [C, 4, 4]
-        Ks: Camera intrinsics. [C, 3, 3]
+        means: Gaussian means. [B, N, 3]
+        covars: Gaussian covariances (flattened upper triangle). [B, N, 6] Optional.
+        quats: Quaternions (No need to be normalized). [B, N, 4] Optional.
+        scales: Scales. [B, N, 3] Optional.
+        viewmats: Camera-to-world matrices. [B, C, 4, 4]
+        Ks: Camera intrinsics. [B, C, 3, 3]
         width: Image width.
         height: Image height.
         eps2d: A epsilon added to the 2D covariance for numerical stability. Default: 0.3.
@@ -275,26 +277,27 @@ def fully_fused_projection(
 
         If `packed` is False:
 
-        - **radii**. The maximum radius of the projected Gaussians in pixel unit. Int32 tensor of shape [C, N].
-        - **means**. Projected Gaussian means in 2D. [C, N, 2]
-        - **depths**. The z-depth of the projected Gaussians. [C, N]
-        - **conics**. Inverse of the projected covariances. Return the flattend upper triangle with [C, N, 3]
-        - **compensations**. The view-dependent opacity compensation factor. [C, N]
+        - **radii**. The maximum radius of the projected Gaussians in pixel unit. Int32 tensor of shape [B, C, N].
+        - **means**. Projected Gaussian means in 2D. [B, C, N, 2]
+        - **depths**. The z-depth of the projected Gaussians. [B, C, N]
+        - **conics**. Inverse of the projected covariances. Return the flattend upper triangle with [B, C, N, 3]
+        - **compensations**. The view-dependent opacity compensation factor. [B, C, N]
     """
-    C = viewmats.size(0)
-    N = means.size(0)
-    assert means.size() == (N, 3), means.size()
-    assert viewmats.size() == (C, 4, 4), viewmats.size()
-    assert Ks.size() == (C, 3, 3), Ks.size()
+    B = means.size(0)
+    C = viewmats.size(1)
+    N = means.size(1)
+    assert means.size() == (B, N, 3), means.size()
+    assert viewmats.size() == (B, C, 4, 4), viewmats.size()
+    assert Ks.size() == (B, C, 3, 3), Ks.size()
     means = means.contiguous()
     if covars is not None:
-        assert covars.size() == (N, 6), covars.size()
+        assert covars.size() == (B, N, 6), covars.size()
         covars = covars.contiguous()
     else:
         assert quats is not None, "covars or quats is required"
         assert scales is not None, "covars or scales is required"
-        assert quats.size() == (N, 4), quats.size()
-        assert scales.size() == (N, 3), scales.size()
+        assert quats.size() == (B, N, 4), quats.size()
+        assert scales.size() == (B, N, 3), scales.size()
         quats = quats.contiguous()
         scales = scales.contiguous()
     if sparse_grad:
@@ -304,12 +307,12 @@ def fully_fused_projection(
     Ks = Ks.contiguous()
     if packed:
         return _FullyFusedProjectionPacked.apply(
-            means,
-            covars,
-            quats,
-            scales,
-            viewmats,
-            Ks,
+            means[0],
+            covars[0],
+            quats[0],
+            scales[0],
+            viewmats[0],
+            Ks[0],
             width,
             height,
             eps2d,
@@ -740,9 +743,9 @@ class _WorldToCam(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        means: Tensor,  # [N, 3]
-        covars: Tensor,  # [N, 3, 3]
-        viewmats: Tensor,  # [C, 4, 4]
+        means: Tensor,  # [B, N, 3]
+        covars: Tensor,  # [B, N, 3, 3]
+        viewmats: Tensor,  # [B, C, 4, 4]
     ) -> Tuple[Tensor, Tensor]:
         means_c, covars_c = _make_lazy_cuda_func("world_to_cam_fwd")(
             means, covars, viewmats
@@ -778,12 +781,12 @@ class _FullyFusedProjection(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        means: Tensor,  # [N, 3]
-        covars: Tensor,  # [N, 6] or None
-        quats: Tensor,  # [N, 4] or None
-        scales: Tensor,  # [N, 3] or None
-        viewmats: Tensor,  # [C, 4, 4]
-        Ks: Tensor,  # [C, 3, 3]
+        means: Tensor,  # [B, N, 3]
+        covars: Tensor,  # [B, N, 6] or None
+        quats: Tensor,  # [B, N, 4] or None
+        scales: Tensor,  # [B, N, 3] or None
+        viewmats: Tensor,  # [B, C, 4, 4]
+        Ks: Tensor,  # [B, C, 3, 3]
         width: int,
         height: int,
         eps2d: float,
@@ -1034,12 +1037,12 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        means: Tensor,  # [N, 3]
-        covars: Tensor,  # [N, 6] or None
-        quats: Tensor,  # [N, 4] or None
-        scales: Tensor,  # [N, 3] or None
-        viewmats: Tensor,  # [C, 4, 4]
-        Ks: Tensor,  # [C, 3, 3]
+        means: Tensor,  # [B, N, 3]
+        covars: Tensor,  # [B, N, 6] or None
+        quats: Tensor,  # [B, N, 4] or None
+        scales: Tensor,  # [B, N, 3] or None
+        viewmats: Tensor,  # [B, C, 4, 4]
+        Ks: Tensor,  # [B, C, 3, 3]
         width: int,
         height: int,
         eps2d: float,
@@ -1049,13 +1052,13 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         sparse_grad: bool,
         calc_compensations: bool,
         camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    ):
         camera_model_type = _make_lazy_cuda_obj(
             f"CameraModelType.{camera_model.upper()}"
         )
 
         (
-            indptr,
+            batch_ids,
             camera_ids,
             gaussian_ids,
             radii,
@@ -1082,6 +1085,7 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         if not calc_compensations:
             compensations = None
         ctx.save_for_backward(
+            batch_ids,
             camera_ids,
             gaussian_ids,
             means,
@@ -1099,11 +1103,12 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         ctx.sparse_grad = sparse_grad
         ctx.camera_model_type = camera_model_type
 
-        return camera_ids, gaussian_ids, radii, means2d, depths, conics, compensations
+        return batch_ids, camera_ids, gaussian_ids, radii, means2d, depths, conics, compensations
 
     @staticmethod
     def backward(
         ctx,
+        v_batch_ids,
         v_camera_ids,
         v_gaussian_ids,
         v_radii,
@@ -1113,6 +1118,7 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         v_compensations,
     ):
         (
+            batch_ids,
             camera_ids,
             gaussian_ids,
             means,
@@ -1144,6 +1150,7 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             width,
             height,
             eps2d,
+            batch_ids,
             camera_model_type,
             camera_ids,
             gaussian_ids,
@@ -1166,40 +1173,40 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
                 # the tensor but this requires the tensor to be leaf node only. And
                 # a customized optimizer would be needed in this case.
                 v_means = torch.sparse_coo_tensor(
-                    indices=gaussian_ids[None],  # [1, nnz]
+                    indices=torch.stack([batch_ids, gaussian_ids]),
                     values=v_means,  # [nnz, 3]
                     size=means.size(),  # [N, 3]
-                    is_coalesced=len(viewmats) == 1,
+                    is_coalesced=viewmats.shape[1] == 1,
                 )
         if not ctx.needs_input_grad[1]:
             v_covars = None
         else:
             if sparse_grad:
                 v_covars = torch.sparse_coo_tensor(
-                    indices=gaussian_ids[None],  # [1, nnz]
+                    indices=torch.stack([batch_ids, gaussian_ids]),
                     values=v_covars,  # [nnz, 6]
                     size=covars.size(),  # [N, 6]
-                    is_coalesced=len(viewmats) == 1,
+                    is_coalesced=viewmats.shape[1] == 1,
                 )
         if not ctx.needs_input_grad[2]:
             v_quats = None
         else:
             if sparse_grad:
                 v_quats = torch.sparse_coo_tensor(
-                    indices=gaussian_ids[None],  # [1, nnz]
+                    indices=torch.stack([batch_ids, gaussian_ids]),
                     values=v_quats,  # [nnz, 4]
                     size=quats.size(),  # [N, 4]
-                    is_coalesced=len(viewmats) == 1,
+                    is_coalesced=viewmats.shape[1] == 1,
                 )
         if not ctx.needs_input_grad[3]:
             v_scales = None
         else:
             if sparse_grad:
                 v_scales = torch.sparse_coo_tensor(
-                    indices=gaussian_ids[None],  # [1, nnz]
+                    indices=torch.stack([batch_ids, gaussian_ids]),
                     values=v_scales,  # [nnz, 3]
                     size=scales.size(),  # [N, 3]
-                    is_coalesced=len(viewmats) == 1,
+                    is_coalesced=viewmats.shape[1] == 1,
                 )
         if not ctx.needs_input_grad[4]:
             v_viewmats = None

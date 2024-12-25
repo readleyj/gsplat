@@ -1,4 +1,5 @@
 #include "bindings.h"
+#include "helpers.cuh"
 #include "utils.cuh"
 #include "quat_scale_to_covar_preci.cuh"
 #include "proj.cuh"
@@ -20,14 +21,15 @@ namespace cg = cooperative_groups;
 
 template <typename T>
 __global__ void fully_fused_projection_fwd_kernel(
+    const uint32_t B,
     const uint32_t C,
     const uint32_t N,
-    const T *__restrict__ means,    // [N, 3]
-    const T *__restrict__ covars,   // [N, 6] optional
-    const T *__restrict__ quats,    // [N, 4] optional
-    const T *__restrict__ scales,   // [N, 3] optional
-    const T *__restrict__ viewmats, // [C, 4, 4]
-    const T *__restrict__ Ks,       // [C, 3, 3]
+    const T *__restrict__ means,    // [B, N, 3]
+    const T *__restrict__ covars,   // [B, N, 6] optional
+    const T *__restrict__ quats,    // [B, N, 4] optional
+    const T *__restrict__ scales,   // [B, N, 3] optional
+    const T *__restrict__ viewmats, // [B, C, 4, 4]
+    const T *__restrict__ Ks,       // [B, C, 3, 3]
     const int32_t image_width,
     const int32_t image_height,
     const T eps2d,
@@ -36,24 +38,25 @@ __global__ void fully_fused_projection_fwd_kernel(
     const T radius_clip,
     const CameraModelType camera_model,
     // outputs
-    int32_t *__restrict__ radii,  // [C, N]
-    T *__restrict__ means2d,      // [C, N, 2]
-    T *__restrict__ depths,       // [C, N]
-    T *__restrict__ conics,       // [C, N, 3]
-    T *__restrict__ compensations // [C, N] optional
+    int32_t *__restrict__ radii,  // [B, C, N]
+    T *__restrict__ means2d,      // [B, C, N, 2]
+    T *__restrict__ depths,       // [B, C, N]
+    T *__restrict__ conics,       // [B, C, N, 3]
+    T *__restrict__ compensations // [B, C, N] optional
 ) {
-    // parallelize over C * N.
+    // parallelize over B * C * N.
     uint32_t idx = cg::this_grid().thread_rank();
-    if (idx >= C * N) {
+    if (idx >= B * C * N) {
         return;
     }
-    const uint32_t cid = idx / N; // camera id
-    const uint32_t gid = idx % N; // gaussian id
 
-    // shift pointers to the current camera and gaussian
-    means += gid * 3;
-    viewmats += cid * 16;
-    Ks += cid * 9;
+    const uint32_t bid = idx / (C * N); // batch id
+    const uint32_t cid = idx / N % C;   // camera id
+    const uint32_t gid = idx % N;       // gaussian id
+
+    means += gid * 3 + bid * N * 3;
+    viewmats += cid * 16 + bid * C * 16;
+    Ks += cid * 9 + bid * C * 9;
 
     // glm is column-major but input is row-major
     mat3<T> R = mat3<T>(
@@ -80,7 +83,7 @@ __global__ void fully_fused_projection_fwd_kernel(
     // transform Gaussian covariance to camera space
     mat3<T> covar;
     if (covars != nullptr) {
-        covars += gid * 6;
+        covars += gid * 6 + bid * N * 6;
         covar = mat3<T>(
             covars[0],
             covars[1],
@@ -94,8 +97,8 @@ __global__ void fully_fused_projection_fwd_kernel(
         );
     } else {
         // compute from quaternions and scales
-        quats += gid * 4;
-        scales += gid * 3;
+        quats += gid * 4 + bid * N * 4;
+        scales += gid * 3 + bid * N * 3;
         quat_scale_to_covar_preci<T>(
             glm::make_vec4(quats), glm::make_vec3(scales), &covar, nullptr
         );
@@ -202,12 +205,12 @@ std::tuple<
     torch::Tensor,
     torch::Tensor>
 fully_fused_projection_fwd_tensor(
-    const torch::Tensor &means,                // [N, 3]
-    const at::optional<torch::Tensor> &covars, // [N, 6] optional
-    const at::optional<torch::Tensor> &quats,  // [N, 4] optional
-    const at::optional<torch::Tensor> &scales, // [N, 3] optional
-    const torch::Tensor &viewmats,             // [C, 4, 4]
-    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const torch::Tensor &means,                // [B, N, 3]
+    const at::optional<torch::Tensor> &covars, // [B, N, 6] optional
+    const at::optional<torch::Tensor> &quats,  // [B, N, 4] optional
+    const at::optional<torch::Tensor> &scales, // [B, N, 3] optional
+    const torch::Tensor &viewmats,             // [B, C, 4, 4]
+    const torch::Tensor &Ks,                   // [B, C, 3, 3]
     const uint32_t image_width,
     const uint32_t image_height,
     const float eps2d,
@@ -229,26 +232,27 @@ fully_fused_projection_fwd_tensor(
     GSPLAT_CHECK_INPUT(viewmats);
     GSPLAT_CHECK_INPUT(Ks);
 
-    uint32_t N = means.size(0);    // number of gaussians
-    uint32_t C = viewmats.size(0); // number of cameras
+    uint32_t B = means.size(0);    // batch size
+    uint32_t N = means.size(1);    // number of gaussians
+    uint32_t C = viewmats.size(1); // number of cameras
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
-    torch::Tensor radii =
-        torch::empty({C, N}, means.options().dtype(torch::kInt32));
-    torch::Tensor means2d = torch::empty({C, N, 2}, means.options());
-    torch::Tensor depths = torch::empty({C, N}, means.options());
-    torch::Tensor conics = torch::empty({C, N, 3}, means.options());
+    torch::Tensor radii = torch::empty({B, C, N}, means.options().dtype(torch::kInt32));
+    torch::Tensor means2d = torch::empty({B, C, N, 2}, means.options());
+    torch::Tensor depths = torch::empty({B, C, N}, means.options());
+    torch::Tensor conics = torch::empty({B, C, N, 3}, means.options());
     torch::Tensor compensations;
     if (calc_compensations) {
         // we dont want NaN to appear in this tensor, so we zero intialize it
-        compensations = torch::zeros({C, N}, means.options());
+        compensations = torch::zeros({B, C, N}, means.options());
     }
-    if (C && N) {
+    if (B && C && N) {
         fully_fused_projection_fwd_kernel<float>
-            <<<(C * N + GSPLAT_N_THREADS - 1) / GSPLAT_N_THREADS,
+            <<<(B * C * N + GSPLAT_N_THREADS - 1) / GSPLAT_N_THREADS,
                GSPLAT_N_THREADS,
                0,
                stream>>>(
+                B,
                 C,
                 N,
                 means.data_ptr<float>(),

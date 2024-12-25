@@ -1,6 +1,8 @@
 #include "bindings.h"
 #include "quat.cuh"
 #include "quat_scale_to_covar_preci.cuh"
+#include "helpers.cuh"
+#include "utils.cuh"
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -113,10 +115,10 @@ __global__ void quat_scale_to_covar_preci_bwd_kernel(
 }
 
 std::tuple<torch::Tensor, torch::Tensor> quat_scale_to_covar_preci_bwd_tensor(
-    const torch::Tensor &quats,                  // [N, 4]
-    const torch::Tensor &scales,                 // [N, 3]
-    const at::optional<torch::Tensor> &v_covars, // [N, 3, 3] or [N, 6]
-    const at::optional<torch::Tensor> &v_precis, // [N, 3, 3] or [N, 6]
+    const torch::Tensor &quats,                  // [..., 4]
+    const torch::Tensor &scales,                 // [..., 3]
+    const at::optional<torch::Tensor> &v_covars, // [..., 3, 3] or [..., 6]
+    const at::optional<torch::Tensor> &v_precis, // [..., 3, 3] or [..., 6]
     const bool triu
 ) {
     GSPLAT_DEVICE_GUARD(quats);
@@ -129,7 +131,7 @@ std::tuple<torch::Tensor, torch::Tensor> quat_scale_to_covar_preci_bwd_tensor(
         GSPLAT_CHECK_INPUT(v_precis.value());
     }
 
-    uint32_t N = quats.size(0);
+    uint32_t N = quats.numel() / 4;
 
     torch::Tensor v_scales = torch::empty_like(scales);
     torch::Tensor v_quats = torch::empty_like(quats);

@@ -1,5 +1,7 @@
 #include "bindings.h"
 #include "quat_scale_to_covar_preci.cuh"
+#include "helpers.cuh"
+#include "utils.cuh"
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -91,8 +93,8 @@ __global__ void quat_scale_to_covar_preci_fwd_kernel(
 }
 
 std::tuple<torch::Tensor, torch::Tensor> quat_scale_to_covar_preci_fwd_tensor(
-    const torch::Tensor &quats,  // [N, 4]
-    const torch::Tensor &scales, // [N, 3]
+    const torch::Tensor &quats,  // [..., 4]
+    const torch::Tensor &scales, // [..., 3]
     const bool compute_covar,
     const bool compute_preci,
     const bool triu
@@ -101,21 +103,34 @@ std::tuple<torch::Tensor, torch::Tensor> quat_scale_to_covar_preci_fwd_tensor(
     GSPLAT_CHECK_INPUT(quats);
     GSPLAT_CHECK_INPUT(scales);
 
-    uint32_t N = quats.size(0);
+    uint32_t N = quats.numel() / 4;
 
+    auto batch_shape = quats.sizes().vec();
+    batch_shape.pop_back();
+    
     torch::Tensor covars, precis;
     if (compute_covar) {
         if (triu) {
-            covars = torch::empty({N, 6}, quats.options());
+            auto shape = batch_shape;
+            shape.push_back(6); // [..., 6]
+            covars = torch::empty(shape, quats.options());
         } else {
-            covars = torch::empty({N, 3, 3}, quats.options());
+            auto shape = batch_shape;
+            shape.push_back(3);
+            shape.push_back(3); // [..., 3, 3]
+            covars = torch::empty(shape, quats.options());
         }
     }
     if (compute_preci) {
         if (triu) {
-            precis = torch::empty({N, 6}, quats.options());
+            auto shape = batch_shape;
+            shape.push_back(6); // [..., 6]
+            precis = torch::empty(shape, quats.options());
         } else {
-            precis = torch::empty({N, 3, 3}, quats.options());
+            auto shape = batch_shape;
+            shape.push_back(3);
+            shape.push_back(3); // [..., 3, 3]
+            precis = torch::empty(shape, quats.options());
         }
     }
 

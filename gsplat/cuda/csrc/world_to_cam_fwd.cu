@@ -1,5 +1,7 @@
 #include "bindings.h"
 #include "transform.cuh"
+#include "helpers.cuh"
+#include "utils.cuh"
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -17,29 +19,31 @@ namespace cg = cooperative_groups;
 
 template <typename T>
 __global__ void world_to_cam_fwd_kernel(
+    const uint32_t B,
     const uint32_t C,
     const uint32_t N,
-    const T *__restrict__ means,    // [N, 3]
-    const T *__restrict__ covars,   // [N, 3, 3]
-    const T *__restrict__ viewmats, // [C, 4, 4]
-    T *__restrict__ means_c,        // [C, N, 3]
-    T *__restrict__ covars_c        // [C, N, 3, 3]
+    const T *__restrict__ means,    // [B, N, 3]
+    const T *__restrict__ covars,   // [B, N, 3, 3]
+    const T *__restrict__ viewmats, // [B, C, 4, 4]
+    T *__restrict__ means_c,        // [B, C, N, 3]
+    T *__restrict__ covars_c        // [B, C, N, 3, 3]
 ) {
     // For now we'll upcast float16 and bfloat16 to float32
     using OpT = typename OpType<T>::type;
 
-    // parallelize over C * N.
+    // parallelize over B * C * N.
     const uint32_t idx = cg::this_grid().thread_rank();
-    if (idx >= C * N) {
+    if (idx >= B * C * N) {
         return;
     }
-    const uint32_t cid = idx / N; // camera id
-    const uint32_t gid = idx % N; // gaussian id
+    const uint32_t bid = idx / (C * N); // batch id
+    const uint32_t cid = idx / N % C;   // camera id
+    const uint32_t gid = idx % N;       // gaussian id
 
     // shift pointers to the current camera and gaussian
-    means += gid * 3;
-    covars += gid * 9;
-    viewmats += cid * 16;
+    means += gid * 3 + bid * N * 3;
+    covars += gid * 9 + bid * N * 9;
+    viewmats += cid * 16 + bid * C * 16;
 
     // glm is column-major but input is row-major
     const mat3<OpT> R = mat3<OpT>(
@@ -83,20 +87,21 @@ __global__ void world_to_cam_fwd_kernel(
 }
 
 std::tuple<torch::Tensor, torch::Tensor> world_to_cam_fwd_tensor(
-    const torch::Tensor &means,   // [N, 3]
-    const torch::Tensor &covars,  // [N, 3, 3]
-    const torch::Tensor &viewmats // [C, 4, 4]
+    const torch::Tensor &means,   // [B, N, 3]
+    const torch::Tensor &covars,  // [B, N, 3, 3]
+    const torch::Tensor &viewmats // [B, C, 4, 4]
 ) {
     GSPLAT_DEVICE_GUARD(means);
     GSPLAT_CHECK_INPUT(means);
     GSPLAT_CHECK_INPUT(covars);
     GSPLAT_CHECK_INPUT(viewmats);
 
-    uint32_t N = means.size(0);
-    uint32_t C = viewmats.size(0);
+    uint32_t B = means.size(0);
+    uint32_t N = means.size(1);
+    uint32_t C = viewmats.size(1);
 
-    torch::Tensor means_c = torch::empty({C, N, 3}, means.options());
-    torch::Tensor covars_c = torch::empty({C, N, 3, 3}, means.options());
+    torch::Tensor means_c = torch::empty({B, C, N, 3}, means.options());
+    torch::Tensor covars_c = torch::empty({B, C, N, 3, 3}, means.options());
 
     if (C && N) {
         at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
@@ -107,10 +112,11 @@ std::tuple<torch::Tensor, torch::Tensor> world_to_cam_fwd_tensor(
             "world_to_cam_bwd",
             [&]() {
                 world_to_cam_fwd_kernel<scalar_t>
-                    <<<(C * N + GSPLAT_N_THREADS - 1) / GSPLAT_N_THREADS,
+                    <<<(B * C * N + GSPLAT_N_THREADS - 1) / GSPLAT_N_THREADS,
                        GSPLAT_N_THREADS,
                        0,
                        stream>>>(
+                        B,
                         C,
                         N,
                         means.data_ptr<scalar_t>(),
